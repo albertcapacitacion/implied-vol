@@ -1,87 +1,34 @@
 #!/usr/bin/env python
 
 """
-Example for Implied Volatility using nag4py
-Finds a zero of the Black Scholes function using c05ayc and s30aac
+Example for Implied Volatility using the NAG Library for Python
+Finds implied volatilities of the Black Scholes equation using specfun.opt_imp_vol
 Data needs to be downloaded from:
 http://www.cboe.com/delayedquote/QuoteTableDownload.aspx
 Make sure to download data during CBOE Trading Hours.
 
-Updated for nag4py-23.0
+Updated for NAG Library for Python Mark 27.1
 """
 
 try:
     import os,sys
     import pandas
-    import numpy
+    import numpy as np
     import matplotlib.pylab as plt
+    import warnings
+    from naginterfaces.library import specfun, fit
+    from naginterfaces.base import utils
     from matplotlib import cm
-    from mpl_toolkits.mplot3d import axes3d 
-    from ctypes import cast, py_object
-    from nag4py.a00 import a00acc
-    from nag4py.s import s30aac
-    from nag4py.c05 import c05ayc
-    from nag4py.c05 import NAG_C05AYC_FUN
-    from nag4py.e02 import e02cac
-    from nag4py.e02 import e02cbc
-    from nag4py.util import Nag_Comm, Nag_RowMajor, Nag_Call, Nag_Put, Pointer, nag_int_type, Integer, noisy_fail, quiet_fail
+    from mpl_toolkits.mplot3d import axes3d
 
 except ImportError as e:
-    print("Could not import the following module. Are you using the correct nag4py version?")
+    print("Could not import the following module. Do you have a working installation of the NAG Library for Python?")
     print(e)
     sys.exit(1)
 
-__author__ = "John Morrissey and Brian Spector"
-__copyright__ = "Copyright 2014, The Numerical Algorithms Group Inc"
+__author__ = "Edvin Hopkins, John Morrissey and Brian Spector"
+__copyright__ = "Copyright 2021, The Numerical Algorithms Group Inc"
 __email__ = "support@nag.co.uk"
-
-
-def callback(x, comm):
-    """
-    Callback that calculates the Black Scholes Option Price for a given Volatility
-    """
-
-    fail = noisy_fail()
-
-    p_userdata = cast(comm[0].p, py_object)
-    userdata = p_userdata.value
-
-    time = numpy.array(userdata[0])
-    callput = userdata[1]
-    strike = numpy.array(userdata[2])
-    underlying = userdata[3]
-    current_price = userdata[4]
-    out = numpy.array(0.0)
-    p_x = numpy.array(x,dtype=numpy.double)
-    
-    # NAG function call 
-    s30aac(Nag_RowMajor, callput, 1, 1, strike, underlying, time, p_x, 0.0, 0.0, out, fail)
-    if(fail.code == 0):
-        return out.item() - current_price
-    print(fail.message)
-    return 0.0
-
-def calcvol(exp, strike, todays_date, underlying, current_price, callput):
-    """
-    Root-finding method that calls NAG Library to calculate Implied Volatility
-    """
-
-    fail = quiet_fail()
-
-    volatility = numpy.array(.5)
-    time = (exp - todays_date) / 365.0
-    userdate = time, callput, strike, underlying, current_price
-    comm = Nag_Comm()
-    comm.p = cast(id(userdate), Pointer)
-
-    pyfun = NAG_C05AYC_FUN(callback)
-
-    # NAG function call
-    c05ayc(0.00000001, 1.0, .00001, 0.0, pyfun, volatility, comm, fail)
-    if (fail.code == 0):
-        return volatility.item()
-    else:
-        return 0.0
 
 # Set to hold expiration dates
 dates = []
@@ -93,10 +40,6 @@ cumulative_month = {'Jan': 31, 'Feb': 57, 'Mar': 90,
 
 
 def main():
-
-    if(a00acc() != 1):
-        print("Cannot find a valid NAG license")
-        sys.exit(1)
 
     try:
         if(len(sys.argv)>1):
@@ -144,7 +87,6 @@ def main():
     data = data.fillna(0.0)
 
     # Let's look at data where there was a recent sale 
-#    data = data[data.Calls > 0]
     data = data[(data['Last Sale'] > 0) | (data['Last Sale.1'] > 0)]
 
     # Get the Options Expiration Date
@@ -156,32 +98,27 @@ def main():
     strike.name = 'Strike'
 
     data = data.join(exp).join(strike)
-
+    
+    print("Number of data points found: {}\n".format(len(data.index)))
+        
     print('Calculating Implied Vol of Calls...')
-    impvolcall = pandas.Series(pandas.np.zeros(len(data.index)),
-                               index=data.index, name='impvolCall')
-    for i in data.index:
-        impvolcall[i] = (calcvol(data.Expiration[i],
-                                 data.Strike[i],
-                                 today,
-                                 underlyingprice,
-                                 (data.Bid[i] + data.Ask[i]) / 2, Nag_Call))
+    r = np.zeros(len(data.index))
+    t = (data.Expiration - today)/365.0
+    s0 = np.full(len(data.index),underlyingprice)
+    pCall= (data.Bid + data.Ask) / 2
+    
+    # A lot of the data is incomplete or extreme so we tell the NAG routine
+    # not to worry about warning us about data points it can't work with
+    warnings.simplefilter('ignore',utils.NagAlgorithmicWarning)
+    sigmaCall, ivalidCall = specfun.opt_imp_vol('C',pCall,data.Strike, s0,t,r,mode = 1)
+    impvolcall = pandas.Series(sigmaCall,index=data.index, name='impvolCall')
 
-    print('Calculated Implied Vol for %d Calls' % len(data.index))
     data = data.join(impvolcall)
 
     print('Calculating Implied Vol of Puts...')
-    impvolput = pandas.Series(numpy.zeros(len(data.index)),
-                              index=data.index, name='impvolPut')
-
-    for i in data.index:
-        impvolput[i] = (calcvol(data.Expiration[i],
-                                data.Strike[i],
-                                today,
-                                underlyingprice,
-                                (data['Bid.1'][i] + data['Ask.1'][i]) / 2.0, Nag_Put))
-
-    print('Calculated Implied Vol for %i Puts' % len(data.index))
+    pPut= (data['Bid.1'] + data['Ask.1']) / 2
+    sigmaPut, ivalidPut = specfun.opt_imp_vol('P',pPut,data.Strike, s0,t,r,mode = 1)
+    impvolput = pandas.Series(sigmaPut,index=data.index, name='impvolPut')
 
     data = data.join(impvolput)
     fig = plt.figure(1)
@@ -197,11 +134,9 @@ def main():
         plot_year, plot_month = date.split()
         plot_date = (int(plot_year) - (current_year % 2000)) * 365 + cumulative_month[plot_month]
         plot_call = data[(data.impvolCall > .01) &
-                       (data.impvolCall < 1) &
                        (data.Expiration == plot_date) &
                        (data['Last Sale'] > 0)]
         plot_put = data[(data.impvolPut > .01) &
-                        (data.impvolPut < 1) &
                         (data.Expiration == plot_date) &
                         (data['Last Sale.1'] > 0)]
 
@@ -209,8 +144,8 @@ def main():
         xloc = plt.MaxNLocator(max_xticks)
         myfig.xaxis.set_major_locator(xloc)
         myfig.set_title('Expiry: %s 20%s' % (plot_month, plot_year))
-        myfig.plot(plot_call.Strike, plot_call.impvolCall, 'pr', label='call')
-        myfig.plot(plot_put.Strike, plot_put.impvolPut, 'p', label='put')
+        myfig.plot(plot_call.Strike, plot_call.impvolCall, 'pr', label='call',markersize=0.5)
+        myfig.plot(plot_put.Strike, plot_put.impvolPut, 'p', label='put',markersize=0.5)
         myfig.legend(loc=1, numpoints=1, prop={'size': 10})
         myfig.set_ylim([0,1])
         myfig.set_xlabel('Strike Price')
@@ -224,16 +159,16 @@ def main():
     print("\nPlotting Volatility Curves/Surface")
     """
     The code below will plot the Volatility Surface
-    It uses e02ca to fit with a polynomial and e02cb to evalute at 
+    It uses e02ca to fit with a polynomial and e02cb to evaluate at 
     intermediate points
     """ 
 
-    m = numpy.empty(len(dates), dtype=nag_int_type())
-    y = numpy.empty(len(dates), dtype=numpy.double)
-    xmin = numpy.empty(len(dates), dtype=numpy.double)    
-    xmax = numpy.empty(len(dates), dtype=numpy.double)
+    m = np.empty(len(dates), dtype=np.int32)
+    y = np.empty(len(dates), dtype=np.double)
+    xmin = np.empty(len(dates), dtype=np.double)    
+    xmax = np.empty(len(dates), dtype=np.double)
  
-    data = data.sort('Strike') # Need to sort for NAG Algorithm
+    data = data.sort_values(by=['Strike']) # Need to sort for NAG Algorithm
 
     k = 3   # this is the degree of polynomial for x-axis (Strike Price)
     l = 3   # this is the degree of polynomial for y-axis (Expiration Date)
@@ -255,39 +190,35 @@ def main():
             n = len(dates)
 
             if(i == 0):
-                x = numpy.array(call_data.Strike)
-                call = numpy.array(call_data.impvolPut)
+                x = np.array(call_data.Strike)
+                call = np.array(call_data.impvolPut)
                 xmin[0] = x.min()
                 xmax[0] = x.max()
             else:
-                x2 = numpy.array(call_data.Strike)
-                x = numpy.append(x,x2)
-                call2 = numpy.array(call_data.impvolPut)
-                call = numpy.append(call,call2)
+                x2 = np.array(call_data.Strike)
+                x = np.append(x,x2)
+                call2 = np.array(call_data.impvolPut)
+                call = np.append(call,call2)
                 xmin[i] = x2.min()
                 xmax[i] = x2.max()
             y[i] = plot_date-today
             i+=1
-    nux = numpy.zeros(1,dtype=numpy.double)
-    nuy = numpy.zeros(1,dtype=numpy.double)
+    nux = np.zeros(1,dtype=np.double)
+    nuy = np.zeros(1,dtype=np.double)
     inux = 1
     inuy = 1
 
     if(len(dates) != i):
         print("Error with data: the CBOE may not be open for trading or one expiration date has null data")
         return 0
-    weight = numpy.ones(call.size, dtype=numpy.double)
-
-    output_coef = numpy.empty((k + 1) * (l + 1),dtype=numpy.double)
-     
-    fail = noisy_fail()    
+    weight = np.ones(call.size, dtype=np.double)
     
     #Call the NAG Chebyshev fitting function
-    e02cac(m,n,k,l,x,y,call,weight,output_coef,xmin,xmax,nux,inux,nuy,inuy,fail)        
+    output_coef = fit.dim2_cheb_lines(m,k,l,x,y,call,weight,(k + 1) * (l + 1),xmin,xmax,nux,nuy)        
    
     """
     Now that we have fit the function,
-    we use e02cb to evaluate at different strikes/expirations 
+    we use fit.dim2_cheb_eval to evaluate at different strikes/expirations 
     """
 
     nStrikes = 100 # number of Strikes to evaluate    
@@ -299,31 +230,27 @@ def main():
         xmin = data.Strike.min()
         xmax = data.Strike.max()
          
-        x = numpy.linspace(xmin, xmax, nStrikes)
+        x = np.linspace(xmin, xmax, nStrikes)
 
         ymin = data.Expiration.min() - today
         ymax = data.Expiration.max() - today
       
-        y = (ymin) + i * numpy.floor((ymax - ymin) / spacing) 
+        y = (ymin) + i * np.floor((ymax - ymin) / spacing) 
 
-        fx=numpy.empty(nStrikes)
-        fail=quiet_fail()
+        fx=np.empty(nStrikes)
 
-        e02cbc(mfirst,mlast,k,l,x,xmin,xmax,y,ymin,ymax,fx,output_coef,fail)
-        
-        if(fail.code != 0):
-            print(fail.message)
+        fx=fit.dim2_cheb_eval(mfirst,k,l,x,xmin,xmax,y,ymin,ymax,output_coef)
         
         if 'xaxis' in locals():
-            xaxis = numpy.append(xaxis, x)
-            temp = numpy.empty(len(x))
+            xaxis = np.append(xaxis, x)
+            temp = np.empty(len(x))
             temp.fill(y)
-            yaxis = numpy.append(yaxis, temp)    
+            yaxis = np.append(yaxis, temp)    
             for j in range(len(x)):
                 zaxis.append(fx[j])
         else:
             xaxis = x
-            yaxis = numpy.empty(len(x), dtype=numpy.double)
+            yaxis = np.empty(len(x), dtype=np.double)
             yaxis.fill(y)
             zaxis = []
             for j in range(len(x)):
